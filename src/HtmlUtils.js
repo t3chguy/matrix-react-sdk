@@ -1,5 +1,6 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
+Copyright 2017 New Vector Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,18 +24,42 @@ var linkifyMatrix = require('./linkify-matrix');
 import escape from 'lodash/escape';
 import emojione from 'emojione';
 import classNames from 'classnames';
+import MatrixClientPeg from './MatrixClientPeg';
 
 emojione.imagePathSVG = 'emojione/svg/';
+// Store PNG path for displaying many flags at once (for increased performance over SVG)
+emojione.imagePathPNG = 'emojione/png/';
+// Use SVGs for emojis
 emojione.imageType = 'svg';
 
+// Anything outside the basic multilingual plane will be a surrogate pair
+const SURROGATE_PAIR_PATTERN = /([\ud800-\udbff])([\udc00-\udfff])/;
+// And there a bunch more symbol characters that emojione has within the
+// BMP, so this includes the ranges from 'letterlike symbols' to
+// 'miscellaneous symbols and arrows' which should catch all of them
+// (with plenty of false positives, but that's OK)
+const SYMBOL_PATTERN = /([\u2100-\u2bff])/;
+
+// And this is emojione's complete regex
 const EMOJI_REGEX = new RegExp(emojione.unicodeRegexp+"+", "gi");
 const COLOR_REGEX = /^#[0-9a-fA-F]{6}$/;
+
+/*
+ * Return true if the given string contains emoji
+ * Uses a much, much simpler regex than emojione's so will give false
+ * positives, but useful for fast-path testing strings to see if they
+ * need emojification.
+ * unicodeToImage uses this function.
+ */
+export function containsEmoji(str) {
+    return SURROGATE_PAIR_PATTERN.test(str) || SYMBOL_PATTERN.test(str);
+}
 
 /* modified from https://github.com/Ranks/emojione/blob/master/lib/js/emojione.js
  * because we want to include emoji shortnames in title text
  */
-export function unicodeToImage(str) {
-    let replaceWith, unicode, alt;
+function unicodeToImage(str) {
+    let replaceWith, unicode, alt, short, fname;
     const mappedUnicode = emojione.mapUnicodeToShort();
 
     str = str.replace(emojione.regUnicode, function(unicodeChar) {
@@ -46,11 +71,14 @@ export function unicodeToImage(str) {
             // get the unicode codepoint from the actual char
             unicode = emojione.jsEscapeMap[unicodeChar];
 
+            short = mappedUnicode[unicode];
+            fname = emojione.emojioneList[short].fname;
+
             // depending on the settings, we'll either add the native unicode as the alt tag, otherwise the shortname
             alt = (emojione.unicodeAlt) ? emojione.convert(unicode.toUpperCase()) : mappedUnicode[unicode];
             const title = mappedUnicode[unicode];
 
-            replaceWith = `<img class="mx_emojione" title="${title}" alt="${alt}" src="${emojione.imagePathSVG}${unicode}.svg${emojione.cacheBustParam}"/>`;
+            replaceWith = `<img class="mx_emojione" title="${title}" alt="${alt}" src="${emojione.imagePathSVG}${fname}.svg${emojione.cacheBustParam}"/>`;
             return replaceWith;
         }
     });
@@ -64,17 +92,24 @@ export function unicodeToImage(str) {
  * emoji.
  *
  * @param alt {string} String to use for the image alt text
+ * @param useSvg {boolean} Whether to use SVG image src. If False, PNG will be used.
  * @param unicode {integer} One or more integers representing unicode characters
  * @returns A img node with the corresponding emoji
  */
-export function charactersToImageNode(alt, ...unicode) {
+export function charactersToImageNode(alt, useSvg, ...unicode) {
     const fileName = unicode.map((u) => {
         return u.toString(16);
     }).join('-');
-    return <img alt={alt} src={`${emojione.imagePathSVG}${fileName}.svg${emojione.cacheBustParam}`}/>;
+    const path = useSvg ? emojione.imagePathSVG : emojione.imagePathPNG;
+    const fileType = useSvg ? 'svg' : 'png';
+    return <img
+        alt={alt}
+        src={`${path}${fileName}.${fileType}${emojione.cacheBustParam}`}
+    />;
 }
 
-export function stripParagraphs(html: string): string {
+
+export function processHtmlForSending(html: string): string {
     const contentDiv = document.createElement('div');
     contentDiv.innerHTML = html;
 
@@ -83,10 +118,21 @@ export function stripParagraphs(html: string): string {
     }
 
     let contentHTML = "";
-    for (let i=0; i<contentDiv.children.length; i++) {
+    for (let i=0; i < contentDiv.children.length; i++) {
         const element = contentDiv.children[i];
         if (element.tagName.toLowerCase() === 'p') {
-            contentHTML += element.innerHTML + '<br />';
+            contentHTML += element.innerHTML;
+            // Don't add a <br /> for the last <p>
+            if (i !== contentDiv.children.length - 1) {
+                contentHTML += '<br />';
+            }
+        } else if (element.tagName.toLowerCase() === 'pre') {
+            // Replace "<br>\n" with "\n" within `<pre>` tags because the <br> is
+            // redundant. This is a workaround for a bug in draft-js-export-html:
+            //   https://github.com/sstur/draft-js-export-html/issues/62
+            contentHTML += '<pre>' +
+                element.innerHTML.replace(/<br>\n/g, '\n').trim() +
+                '</pre>';
         } else {
             const temp = document.createElement('div');
             temp.appendChild(element.cloneNode(true));
@@ -97,34 +143,39 @@ export function stripParagraphs(html: string): string {
     return contentHTML;
 }
 
-var sanitizeHtmlParams = {
+/*
+ * Given an untrusted HTML string, return a React node with an sanitized version
+ * of that HTML.
+ */
+export function sanitizedHtmlNode(insaneHtml) {
+    const saneHtml = sanitizeHtml(insaneHtml, sanitizeHtmlParams);
+
+    return <div dangerouslySetInnerHTML={{ __html: saneHtml }} dir="auto" />;
+}
+
+const sanitizeHtmlParams = {
     allowedTags: [
         'font', // custom to matrix for IRC-style font coloring
         'del', // for markdown
-        // deliberately no h1/h2 to stop people shouting.
-        'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'a', 'ul', 'ol',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'a', 'ul', 'ol', 'sup', 'sub',
         'nl', 'li', 'b', 'i', 'u', 'strong', 'em', 'strike', 'code', 'hr', 'br', 'div',
-        'table', 'thead', 'caption', 'tbody', 'tr', 'th', 'td', 'pre', 'span',
+        'table', 'thead', 'caption', 'tbody', 'tr', 'th', 'td', 'pre', 'span', 'img',
     ],
     allowedAttributes: {
         // custom ones first:
         font: ['color', 'data-mx-bg-color', 'data-mx-color', 'style'], // custom to matrix
         span: ['data-mx-bg-color', 'data-mx-color', 'style'], // custom to matrix
         a: ['href', 'name', 'target', 'rel'], // remote target: custom to matrix
-        // We don't currently allow img itself by default, but this
-        // would make sense if we did
-        img: ['src'],
+        img: ['src', 'width', 'height', 'alt', 'title'],
         ol: ['start'],
+        code: ['class'], // We don't actually allow all classes, we filter them in transformTags
     },
     // Lots of these won't come up by default because we don't allow them
     selfClosing: ['img', 'br', 'hr', 'area', 'base', 'basefont', 'input', 'link', 'meta'],
     // URL schemes we permit
     allowedSchemes: ['http', 'https', 'ftp', 'mailto'],
 
-    // DO NOT USE. sanitize-html allows all URL starting with '//'
-    // so this will always allow links to whatever scheme the
-    // host page is served over.
-    allowedSchemesByTag: {},
+    allowProtocolRelative: false,
 
     transformTags: { // custom to matrix
         // add blank targets to all hyperlinks except vector URLs
@@ -139,21 +190,49 @@ var sanitizeHtmlParams = {
                     attribs.href = m[1];
                     delete attribs.target;
                 }
-
-                m = attribs.href.match(linkifyMatrix.MATRIXTO_URL_PATTERN);
-                if (m) {
-                    var entity = m[1];
-                    if (entity[0] === '@') {
-                        attribs.href = '#/user/' + entity;
+                else {
+                    m = attribs.href.match(linkifyMatrix.MATRIXTO_URL_PATTERN);
+                    if (m) {
+                        var entity = m[1];
+                        if (entity[0] === '@') {
+                            attribs.href = '#/user/' + entity;
+                        }
+                        else if (entity[0] === '#' || entity[0] === '!') {
+                            attribs.href = '#/room/' + entity;
+                        }
+                        delete attribs.target;
                     }
-                    else if (entity[0] === '#' || entity[0] === '!') {
-                        attribs.href = '#/room/' + entity;
-                    }
-                    delete attribs.target;
                 }
             }
             attribs.rel = 'noopener'; // https://mathiasbynens.github.io/rel-noopener/
             return { tagName: tagName, attribs : attribs };
+        },
+        'img': function(tagName, attribs) {
+            // Strip out imgs that aren't `mxc` here instead of using allowedSchemesByTag
+            // because transformTags is used _before_ we filter by allowedSchemesByTag and
+            // we don't want to allow images with `https?` `src`s.
+            if (!attribs.src.startsWith('mxc://')) {
+                return { tagName, attribs: {}};
+            }
+            attribs.src = MatrixClientPeg.get().mxcUrlToHttp(
+                attribs.src,
+                attribs.width || 800,
+                attribs.height || 600,
+            );
+            return { tagName: tagName, attribs: attribs };
+        },
+        'code': function(tagName, attribs) {
+            if (typeof attribs.class !== 'undefined') {
+                // Filter out all classes other than ones starting with language- for syntax highlighting.
+                let classes = attribs.class.split(/\s+/).filter(function(cl) {
+                    return cl.startsWith('language-');
+                });
+                attribs.class = classes.join(' ');
+            }
+            return {
+                tagName: tagName,
+                attribs: attribs,
+            };
         },
         '*': function(tagName, attribs) {
             // Delete any style previously assigned, style is an allowedTag for font and span
@@ -317,6 +396,8 @@ export function bodyToHtml(content, highlights, opts) {
     var isHtml = (content.format === "org.matrix.custom.html");
     let body = isHtml ? content.formatted_body : escape(content.body);
 
+    let bodyHasEmoji = false;
+
     var safeBody;
     // XXX: We sanitize the HTML whilst also highlighting its text nodes, to avoid accidentally trying
     // to highlight HTML tags themselves.  However, this does mean that we don't highlight textnodes which
@@ -334,23 +415,27 @@ export function bodyToHtml(content, highlights, opts) {
             };
         }
         safeBody = sanitizeHtml(body, sanitizeHtmlParams);
-        safeBody = unicodeToImage(safeBody);
+        bodyHasEmoji = containsEmoji(body);
+        if (bodyHasEmoji) safeBody = unicodeToImage(safeBody);
     }
     finally {
         delete sanitizeHtmlParams.textFilter;
     }
 
-    EMOJI_REGEX.lastIndex = 0;
-    let contentBodyTrimmed = content.body !== undefined ? content.body.trim() : '';
-    let match = EMOJI_REGEX.exec(contentBodyTrimmed);
-    let emojiBody = match && match[0] && match[0].length === contentBodyTrimmed.length;
+    let emojiBody = false;
+    if (bodyHasEmoji) {
+        EMOJI_REGEX.lastIndex = 0;
+        let contentBodyTrimmed = content.body !== undefined ? content.body.trim() : '';
+        let match = EMOJI_REGEX.exec(contentBodyTrimmed);
+        emojiBody = match && match[0] && match[0].length === contentBodyTrimmed.length;
+    }
 
     const className = classNames({
         'mx_EventTile_body': true,
         'mx_EventTile_bigEmoji': emojiBody,
         'markdown-body': isHtml,
     });
-    return <span className={className} dangerouslySetInnerHTML={{ __html: safeBody }} />;
+    return <span className={className} dangerouslySetInnerHTML={{ __html: safeBody }} dir="auto" />;
 }
 
 export function emojifyText(text) {

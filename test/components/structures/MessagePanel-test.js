@@ -18,10 +18,13 @@ var React = require('react');
 var ReactDOM = require("react-dom");
 var TestUtils = require('react-addons-test-utils');
 var expect = require('expect');
+import sinon from 'sinon';
 
 var sdk = require('matrix-react-sdk');
 
 var MessagePanel = sdk.getComponent('structures.MessagePanel');
+import UserSettingsStore from '../../../src/UserSettingsStore';
+import MatrixClientPeg from '../../../src/MatrixClientPeg';
 
 var test_utils = require('test-utils');
 var mockclock = require('mock-clock');
@@ -49,15 +52,19 @@ describe('MessagePanel', function () {
     var clock = mockclock.clock();
     var realSetTimeout = window.setTimeout;
     var events = mkEvents();
+    var sandbox = null;
 
     beforeEach(function() {
         test_utils.beforeEach(this);
-        client = test_utils.createTestClient();
+        sandbox = test_utils.stubClient();
+        client = MatrixClientPeg.get();
         client.credentials = {userId: '@me:here'};
+        UserSettingsStore.getSyncedSettings = sinon.stub().returns({});
     });
 
-    afterEach(function () {
+    afterEach(function() {
         clock.uninstall();
+        sandbox.restore();
     });
 
     function mkEvents() {

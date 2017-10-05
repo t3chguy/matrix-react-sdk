@@ -23,6 +23,9 @@ var sdk = require('../../../index');
 
 var Velociraptor = require('../../../Velociraptor');
 require('../../../VelocityBounce');
+import { _t } from '../../../languageHandler';
+
+import DateUtils from '../../../DateUtils';
 
 var bounce = false;
 try {
@@ -64,8 +67,8 @@ module.exports = React.createClass({
         // Timestamp when the receipt was read
         timestamp: React.PropTypes.number,
 
-        // True to show the full date/time rather than just the time
-        showFullTimestamp: React.PropTypes.bool,
+        // True to show twelve hour format, false otherwise
+        showTwelveHour: React.PropTypes.bool,
     },
 
     getDefaultProps: function() {
@@ -120,7 +123,19 @@ module.exports = React.createClass({
         }
 
         var newElement = ReactDOM.findDOMNode(this);
-        var startTopOffset = oldTop - newElement.offsetParent.getBoundingClientRect().top;
+        let startTopOffset;
+        if (!newElement.offsetParent) {
+            // this seems to happen sometimes for reasons I don't understand
+            // the docs for `offsetParent` say it may be null if `display` is
+            // `none`, but I can't see why that would happen.
+            console.warn(
+                `ReadReceiptMarker for ${this.props.member.userId} in ` +
+                `${this.props.member.roomId} has no offsetParent`,
+            );
+            startTopOffset = 0;
+        } else {
+            startTopOffset = oldTop - newElement.offsetParent.getBoundingClientRect().top;
+        }
 
         var startStyles = [];
         var enterTransitionOpts = [];
@@ -128,13 +143,12 @@ module.exports = React.createClass({
         if (oldInfo && oldInfo.left) {
             // start at the old height and in the old h pos
 
-            var leftOffset = oldInfo.left;
             startStyles.push({ top: startTopOffset+"px",
                                left: oldInfo.left+"px" });
 
             var reorderTransitionOpts = {
                 duration: 100,
-                easing: 'easeOut'
+                easing: 'easeOut',
             };
 
             enterTransitionOpts.push(reorderTransitionOpts);
@@ -170,16 +184,10 @@ module.exports = React.createClass({
 
         let title;
         if (this.props.timestamp) {
-            const prefix = "Seen by " + this.props.member.userId + " at ";
-            let ts = new Date(this.props.timestamp);
-            if (this.props.showFullTimestamp) {
-                // "15/12/2016, 7:05:45 PM (@alice:matrix.org)"
-                title = prefix + ts.toLocaleString();
-            }
-            else {
-                // "7:05:45 PM (@alice:matrix.org)"
-                title = prefix + ts.toLocaleTimeString();
-            }
+            title = _t(
+                "Seen by %(userName)s at %(dateTime)s",
+                {userName: this.props.member.userId, dateTime: DateUtils.formatDate(new Date(this.props.timestamp), this.props.showTwelveHour)},
+            );
         }
 
         return (

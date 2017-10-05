@@ -1,6 +1,7 @@
 /*
 Copyright 2015, 2016 OpenMarket Ltd
 Copyright 2017 Vector Creations Ltd
+Copyright 2017 New Vector Ltd
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,11 +16,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-var MatrixClientPeg = require("./MatrixClientPeg");
-var PlatformPeg = require("./PlatformPeg");
-var TextForEvent = require('./TextForEvent');
-var Avatar = require('./Avatar');
-var dis = require("./dispatcher");
+import MatrixClientPeg from './MatrixClientPeg';
+import PlatformPeg from './PlatformPeg';
+import TextForEvent from './TextForEvent';
+import Analytics from './Analytics';
+import Avatar from './Avatar';
+import dis from './dispatcher';
+import sdk from './index';
+import { _t } from './languageHandler';
+import Modal from './Modal';
 
 /*
  * Dispatches:
@@ -29,8 +34,15 @@ var dis = require("./dispatcher");
  * }
  */
 
-var Notifier = {
+const MAX_PENDING_ENCRYPTED = 20;
+
+const Notifier = {
     notifsByRoom: {},
+
+    // A list of event IDs that we've received but need to wait until
+    // they're decrypted until we decide whether to notify for them
+    // or not
+    pendingEncryptedEventIds: [],
 
     notificationMessageForEvent: function(ev) {
         return TextForEvent.textForEvent(ev);
@@ -48,16 +60,16 @@ var Notifier = {
             return;
         }
 
-        var msg = this.notificationMessageForEvent(ev);
+        let msg = this.notificationMessageForEvent(ev);
         if (!msg) return;
 
-        var title;
-        if (!ev.sender || room.name == ev.sender.name) {
+        let title;
+        if (!ev.sender || room.name === ev.sender.name) {
             title = room.name;
             // notificationMessageForEvent includes sender,
             // but we already have the sender here
             if (ev.getContent().body) msg = ev.getContent().body;
-        } else if (ev.getType() == 'm.room.member') {
+        } else if (ev.getType() === 'm.room.member') {
             // context is all in the message here, we don't need
             // to display sender info
             title = room.name;
@@ -68,7 +80,7 @@ var Notifier = {
             if (ev.getContent().body) msg = ev.getContent().body;
         }
 
-        var avatarUrl = ev.sender ? Avatar.avatarUrlForMember(
+        const avatarUrl = ev.sender ? Avatar.avatarUrlForMember(
             ev.sender, 40, 40, 'crop'
         ) : null;
 
@@ -83,19 +95,20 @@ var Notifier = {
     },
 
     _playAudioNotification: function(ev, room) {
-        var e = document.getElementById("messageAudio");
+        const e = document.getElementById("messageAudio");
         if (e) {
-            e.load();
             e.play();
         }
     },
 
     start: function() {
-        this.boundOnRoomTimeline = this.onRoomTimeline.bind(this);
+        this.boundOnEvent = this.onEvent.bind(this);
         this.boundOnSyncStateChange = this.onSyncStateChange.bind(this);
         this.boundOnRoomReceipt = this.onRoomReceipt.bind(this);
-        MatrixClientPeg.get().on('Room.timeline', this.boundOnRoomTimeline);
-        MatrixClientPeg.get().on("Room.receipt", this.boundOnRoomReceipt);
+        this.boundOnEventDecrypted = this.onEventDecrypted.bind(this);
+        MatrixClientPeg.get().on('event', this.boundOnEvent);
+        MatrixClientPeg.get().on('Room.receipt', this.boundOnRoomReceipt);
+        MatrixClientPeg.get().on('Event.decrypted', this.boundOnEventDecrypted);
         MatrixClientPeg.get().on("sync", this.boundOnSyncStateChange);
         this.toolbarHidden = false;
         this.isSyncing = false;
@@ -103,8 +116,9 @@ var Notifier = {
 
     stop: function() {
         if (MatrixClientPeg.get() && this.boundOnRoomTimeline) {
-            MatrixClientPeg.get().removeListener('Room.timeline', this.boundOnRoomTimeline);
-            MatrixClientPeg.get().removeListener("Room.receipt", this.boundOnRoomReceipt);
+            MatrixClientPeg.get().removeListener('Event', this.boundOnEvent);
+            MatrixClientPeg.get().removeListener('Room.receipt', this.boundOnRoomReceipt);
+            MatrixClientPeg.get().removeListener('Event.decrypted', this.boundOnEventDecrypted);
             MatrixClientPeg.get().removeListener('sync', this.boundOnSyncStateChange);
         }
         this.isSyncing = false;
@@ -118,10 +132,13 @@ var Notifier = {
     setEnabled: function(enable, callback) {
         const plaf = PlatformPeg.get();
         if (!plaf) return;
+
+        Analytics.trackEvent('Notifier', 'Set Enabled', enable);
+
         // make sure that we persist the current setting audio_enabled setting
         // before changing anything
         if (global.localStorage) {
-            if(global.localStorage.getItem('audio_notifications_enabled') == null) {
+            if (global.localStorage.getItem('audio_notifications_enabled') === null) {
                 this.setAudioEnabled(this.isEnabled());
             }
         }
@@ -131,6 +148,14 @@ var Notifier = {
             plaf.requestNotificationPermission().done((result) => {
                 if (result !== 'granted') {
                     // The permission request was dismissed or denied
+                    const description = result === 'denied'
+                        ? _t('Riot does not have permission to send you notifications - please check your browser settings')
+                        : _t('Riot was not given permission to send notifications - please try again');
+                    const ErrorDialog = sdk.getComponent('dialogs.ErrorDialog');
+                    Modal.createTrackedDialog('Unable to enable Notifications', result, ErrorDialog, {
+                        title: _t('Unable to enable Notifications'),
+                        description,
+                    });
                     return;
                 }
 
@@ -141,7 +166,7 @@ var Notifier = {
                 if (callback) callback();
                 dis.dispatch({
                     action: "notifier_enabled",
-                    value: true
+                    value: true,
                 });
             });
             // clear the notifications_hidden flag, so that if notifications are
@@ -152,7 +177,7 @@ var Notifier = {
             global.localStorage.setItem('notifications_enabled', 'false');
             dis.dispatch({
                 action: "notifier_enabled",
-                value: false
+                value: false,
             });
         }
     },
@@ -165,7 +190,7 @@ var Notifier = {
 
         if (!global.localStorage) return true;
 
-        var enabled = global.localStorage.getItem('notifications_enabled');
+        const enabled = global.localStorage.getItem('notifications_enabled');
         if (enabled === null) return true;
         return enabled === 'true';
     },
@@ -173,12 +198,12 @@ var Notifier = {
     setAudioEnabled: function(enable) {
         if (!global.localStorage) return;
         global.localStorage.setItem('audio_notifications_enabled',
-                                    enable ? 'true' : 'false');
+            enable ? 'true' : 'false');
     },
 
     isAudioEnabled: function(enable) {
         if (!global.localStorage) return true;
-        var enabled = global.localStorage.getItem(
+        const enabled = global.localStorage.getItem(
             'audio_notifications_enabled');
         // default to true if the popups are enabled
         if (enabled === null) return this.isEnabled();
@@ -188,11 +213,13 @@ var Notifier = {
     setToolbarHidden: function(hidden, persistent = true) {
         this.toolbarHidden = hidden;
 
+        Analytics.trackEvent('Notifier', 'Set Toolbar Hidden', hidden);
+
         // XXX: why are we dispatching this here?
         // this is nothing to do with notifier_enabled
         dis.dispatch({
             action: "notifier_enabled",
-            value: this.isEnabled()
+            value: this.isEnabled(),
         });
 
         // update the info to localStorage for persistent settings
@@ -215,32 +242,39 @@ var Notifier = {
     onSyncStateChange: function(state) {
         if (state === "SYNCING") {
             this.isSyncing = true;
-        }
-        else if (state === "STOPPED" || state === "ERROR") {
+        } else if (state === "STOPPED" || state === "ERROR") {
             this.isSyncing = false;
         }
     },
 
-    onRoomTimeline: function(ev, room, toStartOfTimeline, removed, data) {
-        if (toStartOfTimeline) return;
-        if (!room) return;
+    onEvent: function(ev) {
         if (!this.isSyncing) return; // don't alert for any messages initially
-        if (ev.sender && ev.sender.userId == MatrixClientPeg.get().credentials.userId) return;
-        if (data.timeline.getTimelineSet() !== room.getUnfilteredTimelineSet()) return;
+        if (ev.sender && ev.sender.userId === MatrixClientPeg.get().credentials.userId) return;
 
-        var actions = MatrixClientPeg.get().getPushActionsForEvent(ev);
-        if (actions && actions.notify) {
-            if (this.isEnabled()) {
-                this._displayPopupNotification(ev, room);
+        // If it's an encrypted event and the type is still 'm.room.encrypted',
+        // it hasn't yet been decrypted, so wait until it is.
+        if (ev.isBeingDecrypted() || ev.isDecryptionFailure()) {
+            this.pendingEncryptedEventIds.push(ev.getId());
+            // don't let the list fill up indefinitely
+            while (this.pendingEncryptedEventIds.length > MAX_PENDING_ENCRYPTED) {
+                this.pendingEncryptedEventIds.shift();
             }
-            if (actions.tweaks.sound && this.isAudioEnabled()) {
-                this._playAudioNotification(ev, room);
-            }
+            return;
         }
+
+        this._evaluateEvent(ev);
+    },
+
+    onEventDecrypted: function(ev) {
+        const idx = this.pendingEncryptedEventIds.indexOf(ev.getId());
+        if (idx === -1) return;
+
+        this.pendingEncryptedEventIds.splice(idx, 1);
+        this._evaluateEvent(ev);
     },
 
     onRoomReceipt: function(ev, room) {
-        if (room.getUnreadNotificationCount() == 0) {
+        if (room.getUnreadNotificationCount() === 0) {
             // ideally we would clear each notification when it was read,
             // but we have no way, given a read receipt, to know whether
             // the receipt comes before or after an event, so we can't
@@ -254,6 +288,20 @@ var Notifier = {
                 plaf.clearNotification(notif);
             }
             delete this.notifsByRoom[room.roomId];
+        }
+    },
+
+    _evaluateEvent: function(ev) {
+        const room = MatrixClientPeg.get().getRoom(ev.getRoomId());
+        const actions = MatrixClientPeg.get().getPushActionsForEvent(ev);
+        if (actions && actions.notify) {
+            if (this.isEnabled()) {
+                this._displayPopupNotification(ev, room);
+            }
+            if (actions.tweaks.sound && this.isAudioEnabled()) {
+                PlatformPeg.get().loudNotification(ev, room);
+                this._playAudioNotification(ev, room);
+            }
         }
     }
 };

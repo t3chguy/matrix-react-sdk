@@ -16,7 +16,10 @@ limitations under the License.
 
 'use strict';
 
-var React = require('react');
+import React from 'react';
+import ReactDOM from 'react-dom';
+import { _t, _tJsx } from '../../../languageHandler';
+
 var DIV_ID = 'mx_recaptcha';
 
 /**
@@ -44,6 +47,10 @@ module.exports = React.createClass({
         };
     },
 
+    componentWillMount: function() {
+        this._captchaWidgetId = null;
+    },
+
     componentDidMount: function() {
         // Just putting a script tag into the returned jsx doesn't work, annoyingly,
         // so we do this instead.
@@ -60,7 +67,10 @@ module.exports = React.createClass({
                 // * jumping straight to a hosted captcha page (but we don't support that yet)
                 // * embedding the captcha in an iframe (if that works)
                 // * using a better captcha lib
-                warning.innerHTML = "Robot check is currently unavailable on desktop - please use a <a href='https://riot.im/app'>web browser</a>.";
+                ReactDOM.render(_tJsx(
+                    "Robot check is currently unavailable on desktop - please use a <a>web browser</a>",
+                    /<a>(.*?)<\/a>/,
+                    (sub) => { return <a href='https://riot.im/app'>{ sub }</a>; }), warning);
                 this.refs.recaptchaContainer.appendChild(warning);
             }
             else {
@@ -71,6 +81,10 @@ module.exports = React.createClass({
                 this.refs.recaptchaContainer.appendChild(scriptTag);
             }
         }
+    },
+
+    componentWillUnmount: function() {
+        this._resetRecaptcha();
     },
 
     _renderRecaptcha: function(divId) {
@@ -88,10 +102,16 @@ module.exports = React.createClass({
         }
 
         console.log("Rendering to %s", divId);
-        global.grecaptcha.render(divId, {
+        this._captchaWidgetId = global.grecaptcha.render(divId, {
             sitekey: publicKey,
             callback: this.props.onCaptchaResponse,
         });
+    },
+
+    _resetRecaptcha: function() {
+        if (this._captchaWidgetId !== null) {
+            global.grecaptcha.reset(this._captchaWidgetId);
+        }
     },
 
     _onCaptchaLoaded: function() {
@@ -117,7 +137,7 @@ module.exports = React.createClass({
 
         return (
             <div ref="recaptchaContainer">
-                This Home Server would like to make sure you are not a robot
+                {_t("This Home Server would like to make sure you are not a robot")}
                 <br/>
                 <div id={DIV_ID}></div>
                 {error}

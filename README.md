@@ -24,6 +24,10 @@ In the interim, `vector-im/riot-web` and `matrix-org/matrix-react-sdk` should
 be considered as a single project (for instance, matrix-react-sdk bugs
 are currently filed against vector-im/riot-web rather than this project).
 
+Translation Status
+==================
+[![Translation status](https://translate.riot.im/widgets/riot-web/-/multi-auto.svg)](https://translate.riot.im/engage/riot-web/?utm_source=widget)
+
 Developer Guide
 ===============
 
@@ -42,7 +46,7 @@ Please follow the standard Matrix contributor's guide:
 https://github.com/matrix-org/synapse/tree/master/CONTRIBUTING.rst
 
 Please follow the Matrix JS/React code style as per:
-https://github.com/matrix-org/matrix-react-sdk/tree/master/code_style.rst
+https://github.com/matrix-org/matrix-react-sdk/blob/master/code_style.md
 
 Whilst the layering separation between matrix-react-sdk and Riot is broken
 (as of July 2016), code should be committed as follows:
@@ -190,4 +194,3 @@ Alternative instructions:
   * Create an index.html file pulling in your compiled javascript and the
     CSS bundle from the skin you use. For now, you'll also need to manually
     import CSS from any skins that your skin inherts from.
-

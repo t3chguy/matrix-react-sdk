@@ -14,10 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-'use strict';
-
-var React = require('react');
-var AvatarLogic = require("../../../Avatar");
+import React from 'react';
+import AvatarLogic from '../../../Avatar';
 import sdk from '../../../index';
 import AccessibleButton from '../elements/AccessibleButton';
 
@@ -32,6 +30,7 @@ module.exports = React.createClass({
         urls: React.PropTypes.array, // [highest_priority, ... , lowest_priority]
         width: React.PropTypes.number,
         height: React.PropTypes.number,
+        // XXX resizeMethod not actually used.
         resizeMethod: React.PropTypes.string,
         defaultToInitialLetter: React.PropTypes.bool // true to add default url
     },
